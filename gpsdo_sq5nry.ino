@@ -27,6 +27,8 @@ TinyGPSPlus gps;
 
 // Si5351 PLL synthesiser
 Si5351 si5351;
+#define MIN_FREQ 8000
+#define MAX_FREQ 160000000
 
 // OLED Pins
 #define CS_PIN  10
@@ -53,16 +55,19 @@ SSD1306AsciiSpi oled;
 #define ENCODER_CH_A 3
 #define ENCODER_CH_B 7
 
+// menu stages
 #define MENU_ITEM_MAIN 0
-#define MENU_ITEM_BAND 1
+#define MENU_ITEM_BANK 1
 #define MENU_ITEM_STEP 2
 #define MENU_ITEM_FREQ 3
 #define MENU_ITEM_CORR 4
 #define MENU_ITEM_ZONE 5
 
+// frequency update fsm
 #define FREQ_UPDATE_DONE  0
 #define FREQ_CORR_UPDATED 1
 #define FREQ_MAN_UPDATED  2
+
 
 volatile bool fired;
 volatile bool up;
@@ -85,7 +90,7 @@ boolean GPSstatus = true;
 boolean LOCK_ACHEIVED = false;
 byte new_freq = FREQ_CORR_UPDATED;
 unsigned long freq_step = 1000;
-byte encoderOLD, menu = 0, band = 1, f_step = 1;
+byte encoderOLD, menu = 0, bank = 1, f_step = 1;
 boolean time_enable = true;
 unsigned long pps_correct;
 byte pps_valid = 1;
@@ -262,16 +267,11 @@ void loop() {
           printGpsDetails();
           printDateTime();
           printFrequency();
-          if (LOCK_ACHEIVED)  {
-            printHighPrecMarker(true);
-          }
-          else {
-            printHighPrecMarker(false);
-          }
+          printHighPrecMarker(LOCK_ACHEIVED);
           time_enable = true;
           break;
-        case MENU_ITEM_BAND:
-          printBand();
+        case MENU_ITEM_BANK:
+          printBank();
           break;
         case MENU_ITEM_STEP:
           printStep();
@@ -280,7 +280,7 @@ void loop() {
           printFrequency();
           break;
         case MENU_ITEM_CORR:
-          EEPROM.writeLong(band * 4, Freq);
+          EEPROM.writeLong(bank * 4, Freq);
           printStabilityInfo();
           break;
         case MENU_ITEM_ZONE:
@@ -308,21 +308,21 @@ void ENCread() {
   if (fired) {
       if (up) {
         switch (menu) {
-          case MENU_ITEM_BAND: {
-              band++;
-              if (band > 5) band = 5;
-              printBand();
+          case MENU_ITEM_BANK: {
+              bank++;
+              if (bank > 5) bank = 5;
+              printBank();
             }
             break;
           case MENU_ITEM_STEP: {
               f_step++;
-              if (f_step > 8)f_step = 8;
+              if (f_step > 8) f_step = 8;
               printStep();
             }
             break;
           case MENU_ITEM_FREQ: {
               Freq += freq_step;
-              if (Freq > 160000000) Freq -= freq_step;
+              if (Freq > MAX_FREQ) Freq -= freq_step;
               new_freq = FREQ_MAN_UPDATED;
             }
             break;
@@ -337,10 +337,10 @@ void ENCread() {
       }
       else {
         switch (menu) {
-          case MENU_ITEM_BAND: {
-              band--;
-              if (band == 0) band = 1;
-              printBand();
+          case MENU_ITEM_BANK: {
+              bank--;
+              if (bank == 0) bank = 1;
+              printBank();
             }
             break;
           case MENU_ITEM_STEP: {
@@ -351,13 +351,13 @@ void ENCread() {
             break;
           case MENU_ITEM_FREQ: {
               Freq -= freq_step;
-              if (Freq > 160000000 || Freq < 1000) Freq += freq_step;
+              if (Freq > MAX_FREQ || Freq < MIN_FREQ) Freq += freq_step;
               new_freq = FREQ_MAN_UPDATED;
             }
             break;
           case MENU_ITEM_ZONE: {
               zone--;
-              if (zone < -6)zone = -5;
+              if (zone < -6) zone = -5;
               EEPROM.writeInt(80, zone);
               printTimezone();
             }
@@ -471,7 +471,7 @@ void printFrequency2() {
   time_enable = false;
   oled.setCursor(0, 2);
   oled.print("freq. bank ");
-  oled.print(band);
+  oled.print(bank);
   oled.print(" < > ");
 }
 
@@ -499,13 +499,13 @@ void printStep() {
   }
 }
 
-void printBand() {
+void printBank() {
   time_enable = false;
   oled.setCursor(0, 2);
   oled.print("bank ");
-  oled.print(band);
+  oled.print(bank);
   oled.print("      < > ");
-  Freq = EEPROM.readLong(band * 4);
+  Freq = EEPROM.readLong(bank * 4);
   printFrequency();
   update_si5351a();
 }
