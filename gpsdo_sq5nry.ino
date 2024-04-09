@@ -27,6 +27,8 @@ TinyGPSPlus gps;
 
 // Si5351 PLL synthesiser
 Si5351 si5351;
+#define MIN_FREQ 1000
+#define MAX_FREQ 160000000
 
 // OLED Pins
 #define CS_PIN  10
@@ -53,16 +55,19 @@ SSD1306AsciiSpi oled;
 #define ENCODER_CH_A 3
 #define ENCODER_CH_B 7
 
+// menu stages
 #define MENU_ITEM_MAIN 0
-#define MENU_ITEM_BAND 1
+#define MENU_ITEM_BANK 1
 #define MENU_ITEM_STEP 2
 #define MENU_ITEM_FREQ 3
 #define MENU_ITEM_CORR 4
 #define MENU_ITEM_ZONE 5
 
+// frequency update fsm
 #define FREQ_UPDATE_DONE  0
 #define FREQ_CORR_UPDATED 1
 #define FREQ_MAN_UPDATED  2
+
 
 volatile bool fired;
 volatile bool up;
@@ -83,13 +88,14 @@ char c;
 boolean newdata = false;
 boolean GPSstatus = true;
 boolean LOCK_ACHEIVED = false;
-byte new_freq = FREQ_CORR_UPDATED;
 unsigned long freq_step = 1000;
-byte encoderOLD, menu = 0, band = 1, f_step = 1;
+byte encoderOLD, menu = 0, bank = 1, f_step = 1;
 boolean time_enable = true;
 unsigned long pps_correct;
 byte pps_valid = 1;
 float stab_float = 1000;
+byte freqState = FREQ_CORR_UPDATED;
+boolean firstCorrectionLoopDone = false;
 
 void rotaryEncoderIsr() {
   cli();
@@ -231,9 +237,9 @@ void loop() {
     printGpsDetails();
   }
 
-  if (new_freq == FREQ_CORR_UPDATED) {
+  if (freqState == FREQ_CORR_UPDATED) {
     correct_si5351a();
-    new_freq = FREQ_UPDATE_DONE;
+    freqState = FREQ_UPDATE_DONE;
     if (abs(stab_float)<1)  {
       printHighPrecMarker(true);
       LOCK_ACHEIVED = true;
@@ -244,10 +250,10 @@ void loop() {
     }
   }
 
-  if (new_freq == FREQ_MAN_UPDATED) {
+  if (freqState == FREQ_MAN_UPDATED) {
     update_si5351a();
     printFrequency();
-    new_freq = FREQ_UPDATE_DONE;
+    freqState = FREQ_UPDATE_DONE;
   }
 
   if (digitalRead(encoderButton) == 0) {
@@ -270,8 +276,8 @@ void loop() {
           }
           time_enable = true;
           break;
-        case MENU_ITEM_BAND:
-          printBand();
+        case MENU_ITEM_BANK:
+          printBank();
           break;
         case MENU_ITEM_STEP:
           printStep();
@@ -280,7 +286,7 @@ void loop() {
           printFrequency();
           break;
         case MENU_ITEM_CORR:
-          EEPROM.writeLong(band * 4, Freq);
+          EEPROM.writeLong(bank * 4, Freq);
           printStabilityInfo();
           break;
         case MENU_ITEM_ZONE:
@@ -308,22 +314,22 @@ void ENCread() {
   if (fired) {
       if (up) {
         switch (menu) {
-          case MENU_ITEM_BAND: {
-              band++;
-              if (band > 5) band = 5;
-              printBand();
+          case MENU_ITEM_BANK: {
+              bank++;
+              if (bank > 5) bank = 5;
+              printBank();
             }
             break;
           case MENU_ITEM_STEP: {
               f_step++;
-              if (f_step > 8)f_step = 8;
+              if (f_step > 8) f_step = 8;
               printStep();
             }
             break;
           case MENU_ITEM_FREQ: {
               Freq += freq_step;
-              if (Freq > 160000000) Freq -= freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              if (Freq > MAX_FREQ) Freq -= freq_step;
+              freqState = FREQ_MAN_UPDATED;
             }
             break;
           case MENU_ITEM_ZONE: {
@@ -337,10 +343,9 @@ void ENCread() {
       }
       else {
         switch (menu) {
-          case MENU_ITEM_BAND: {
-              band--;
-              if (band == 0) band = 1;
-              printBand();
+          case MENU_ITEM_BANK: {
+              if (--bank == 0) bank = 1;
+              printBank();
             }
             break;
           case MENU_ITEM_STEP: {
@@ -351,13 +356,12 @@ void ENCread() {
             break;
           case MENU_ITEM_FREQ: {
               Freq -= freq_step;
-              if (Freq > 160000000 || Freq < 1000) Freq += freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              if (Freq > MAX_FREQ || Freq < MIN_FREQ) Freq += freq_step;
+              freqState = FREQ_MAN_UPDATED;
             }
             break;
           case MENU_ITEM_ZONE: {
-              zone--;
-              if (zone < -6)zone = -5;
+              if (--zone < -6) zone = -5;
               EEPROM.writeInt(80, zone);
               printTimezone();
             }
@@ -382,11 +386,12 @@ void PPSinterrupt()
   
   if (tcount == 44)                              //The 40 second gate time elapsed - stop counting
   {
+    firstCorrectionLoopDone = true;
     TCCR1B = 0;                                  //Turn off counter
     if (pps_valid == 1) {
       XtalFreq_old = XtalFreq;
       XtalFreq = mult * 0x10000 + TCNT1;           //Calculate correction factor
-      new_freq = FREQ_CORR_UPDATED;
+      freqState = FREQ_CORR_UPDATED;
     }
     TCNT1 = 0;                                   //Reset count to zero
     mult = 0;
@@ -444,8 +449,12 @@ void printStabilityInfo() {
     oled.print("freq. correction ");
     oled.setCursor(0, 2);
     oled.print("   ");
-    oled.print(stab_float);
-    oled.print(" Hz        ");
+    if (firstCorrectionLoopDone) {
+      oled.print(stab_float);
+      oled.print(" Hz        ");
+    } else {
+      oled.print("N/A        ");
+    }
   }
 }
 
@@ -471,7 +480,7 @@ void printFrequency2() {
   time_enable = false;
   oled.setCursor(0, 2);
   oled.print("freq. bank ");
-  oled.print(band);
+  oled.print(bank);
   oled.print(" < > ");
 }
 
@@ -499,13 +508,13 @@ void printStep() {
   }
 }
 
-void printBand() {
+void printBank() {
   time_enable = false;
   oled.setCursor(0, 2);
   oled.print("bank ");
-  oled.print(band);
+  oled.print(bank);
   oled.print("      < > ");
-  Freq = EEPROM.readLong(band * 4);
+  Freq = EEPROM.readLong(bank * 4);
   printFrequency();
   update_si5351a();
 }
