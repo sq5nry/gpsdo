@@ -1,4 +1,5 @@
 /*
+
  Arduino Controlled GPS Corrected Generator
  
  Permission is granted to use, copy, modify, and distribute this software
@@ -6,8 +7,11 @@
 
  Based on the projects: 
  W3PM (http://www.knology.net/~gmarcus/)
- &  SQ1GU (http://sq1gu.tobis.com.pl/pl/syntezery-dds/44-generator-si5351a)
-*/
+ &
+ SQ1GU (http://sq1gu.tobis.com.pl/pl/syntezery-dds/44-generator-si5351a)
+ 
+ */
+
 #include <TinyGPS++.h>
 #include <string.h>
 #include <ctype.h>
@@ -21,51 +25,40 @@
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiSpi.h"
 
-// GPS receiver
-TinyGPSPlus gps;
-#define ppsPin 2
 
-// Si5351 PLL synthesiser
+// The TinyGPS++ object
+TinyGPSPlus gps;
+
+// The Si5351 object
 Si5351 si5351;
+
+// Zworki
+#define Z1 4
+#define Z2 6
+#define LED A0
+
+// Definicje czestotliwosci dla zworek Z1 i Z2 oraz Z1&Z2
+#define F1 10000000 // zwora Z1
+#define F2 40000000 // zwora Z2
+#define F3 25000000  // zwora Z1&Z2
+
+#define ppsPin                   2
+#define przycisk                 A2
+
+#define CHA 3
+#define CHB 7
+volatile bool fired;
+volatile bool up;
+const byte encoderPinA = 3;
+const byte encoderPinB = 7;
+
 
 // OLED Pins
 #define CS_PIN  10
 #define RST_PIN 9
 #define DC_PIN  8
 
-// display
-SSD1306AsciiSpi oled;
-
-// jumpers for pre-set frequency on start
-#define Z1 4
-#define Z2 6
-
-// fixed frequency presets selected by jumpers
-#define F1 10000000 // Z1
-#define F2 40000000 // Z2
-#define F3 5357000  // Z1 & Z2
-
-// high-precision frequency lock (<1Hz) indicator
-#define LED A0
-
-// rotary encoder
-#define encoderButton A2
-#define ENCODER_CH_A 3
-#define ENCODER_CH_B 7
-
-#define MENU_ITEM_MAIN 0
-#define MENU_ITEM_BAND 1
-#define MENU_ITEM_STEP 2
-#define MENU_ITEM_FREQ 3
-#define MENU_ITEM_CORR 4
-#define MENU_ITEM_ZONE 5
-
-#define FREQ_UPDATE_DONE  0
-#define FREQ_CORR_UPDATED 1
-#define FREQ_MAN_UPDATED  2
-
-volatile bool fired;
-volatile bool up;
+SSD1306AsciiSpi lcd;
 
 unsigned long XtalFreq = 100000000;
 unsigned long XtalFreq_old = 100000000;
@@ -75,15 +68,15 @@ byte stab_count = 44;
 unsigned long mult = 0, Freq = 10000000;
 int second = 0, minute = 0, hour = 0;
 int day = 0, month = 0, year = 0;
-int zone = 0;
+int zone = 2;
 unsigned int tcount = 0;
 unsigned int tcount2 = 0;
 int validGPSflag = false;
 char c;
 boolean newdata = false;
 boolean GPSstatus = true;
-boolean LOCK_ACHEIVED = false;
-byte new_freq = FREQ_CORR_UPDATED;
+boolean fixed = false;
+byte new_freq = 1;
 unsigned long freq_step = 1000;
 byte encoderOLD, menu = 0, band = 1, f_step = 1;
 boolean time_enable = true;
@@ -91,28 +84,36 @@ unsigned long pps_correct;
 byte pps_valid = 1;
 float stab_float = 1000;
 
-void rotaryEncoderIsr() {
+
+void isr()
+{
   cli();
-  if (digitalRead (ENCODER_CH_A))
-    up = digitalRead (ENCODER_CH_B);
+  if (digitalRead (encoderPinA))
+    up = digitalRead (encoderPinB);
   else
-    up = !digitalRead (ENCODER_CH_B);
+    up = !digitalRead (encoderPinB);
   fired = true;
-  delay(150);
   sei();
-}
+}  // end of isr
 
-void setup() {
+
+//*************************************************************************************
+//                                    SETUP
+//*************************************************************************************
+void setup()
+{
   Serial.begin(9600);
-  oled.begin(&Adafruit128x64, CS_PIN, DC_PIN, RST_PIN);
-  oled.setFont(SystemFont5x7);  //ZevvPeep8x16  X11fixed7x14
-  oled.clear();
+  lcd.begin(&Adafruit128x64, CS_PIN, DC_PIN, RST_PIN);
+  lcd.setFont(ZevvPeep8x16);
+  lcd.clear();
 
-  pinMode(ENCODER_CH_A, INPUT);              
-  digitalWrite(ENCODER_CH_A, HIGH);
-  pinMode(ENCODER_CH_B, INPUT);
-  digitalWrite(ENCODER_CH_B, HIGH);
-  pinMode(encoderButton, INPUT_PULLUP);                  
+
+  pinMode(encoderPinA, INPUT);              
+  digitalWrite(encoderPinA, HIGH);
+  pinMode(encoderPinB, INPUT);
+  digitalWrite(encoderPinB, HIGH);
+
+  pinMode(przycisk, INPUT_PULLUP);                  
   pinMode(Z1, INPUT_PULLUP);
   pinMode(Z2, INPUT_PULLUP);
   pinMode(LED, OUTPUT);
@@ -129,8 +130,9 @@ void setup() {
   pinMode(ppsPin, INPUT);                        // Inititalize GPS 1pps input
   digitalWrite(ppsPin, HIGH);
 
+
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
-  si5351.drive_strength(SI5351_CLK1, SI5351_DRIVE_8MA);
+  si5351.drive_strength(SI5351_CLK1, SI5351_DRIVE_2MA);
 
   Serial.begin(9600);
 
@@ -141,44 +143,53 @@ void setup() {
   si5351.set_freq(Freq * SI5351_FREQ_MULT, SI5351_CLK1);
   si5351.update_status();
 
-  if (digitalRead(encoderButton) == 0) {
-    oled.setCursor(0, 0);
-    oled.println("setting defaults");
+  if (digitalRead(przycisk) == 0) {
+
+    lcd.setCursor(0, 2);
+    lcd.print(" Initialization");
     EEPROM.writeLong(1 * 4, 10000000);
-    EEPROM.writeLong(2 * 4, 40000000);
-    EEPROM.writeLong(3 * 4, 1000000);
-    EEPROM.writeLong(4 * 4, 100000000);
+    EEPROM.writeLong(2 * 4, 20000000);
+    EEPROM.writeLong(3 * 4, 24000000);
+    EEPROM.writeLong(4 * 4, 40000000);
     EEPROM.writeLong(5 * 4, 145000000);
     delay(3000);
   }
 
-  oled.println("GPSDO");
-  oled.println("based on projects by");
-  oled.println("W3PM & SQ1GU");
-  delay(4000);
-  oled.clear();
+  lcd.println();
+  lcd.print(" GPS GENERATOR");
+  delay(1000);
+  lcd.clear();
+  lcd.setCursor(36, 0);
+  lcd.print("Based on");
+  lcd.setCursor(4, 2);
+  lcd.print("the projects by");
+  lcd.setCursor(20, 4);
+  lcd.print("W3PM & SQ1GU");
+  delay(2000);
+  lcd.clear();
   
-  oled.setCursor(0, 0);
-  oled.print("waiting for GPS");
+  lcd.setCursor(4, 2);
+  lcd.print("Waiting for GPS");
 
-  processGps(6000);
+  GPSproces(6000);
 
   if (millis() > 5000 && gps.charsProcessed() < 10) {
-    oled.setCursor(0, 2);
-    oled.print("GPS failure");
-    oled.setCursor(0, 4);
-    oled.print ("check wiring! ");
+    lcd.setCursor(0, 2);
+    lcd.print("GPS not connected");
+    lcd.setCursor(0, 4);
+    lcd.print (" check wiring! ");
     delay(5000);
     GPSstatus = false;
   }
-  oled.clear();
+  lcd.clear();
   if (GPSstatus == true) {
-    oled.setCursor(0, 2);
-    oled.print("waiting for sats");
-    printDateTime();
-    printGpsDetails();
+    lcd.setCursor(4, 2);
+    lcd.print("Waiting for SAT");
+    time_on_lcd();
+    date_on_lcd();
+    sat_on_lcd();
     do {
-      processGps(1000);
+      GPSproces(1000);
     } while (gps.satellites.value() == 0);
 
     hour = gps.time.hour() + zone;
@@ -188,32 +199,39 @@ void setup() {
     day = gps.date.day();
     month = gps.date.month();
     year = gps.date.year();
-  
-    oled.clear();
-    printDateTime();
-    printGpsDetails();
+
+    
+    lcd.clear();
+    time_on_lcd();
+    sat_on_lcd();
     attachInterrupt(0, PPSinterrupt, RISING);
     TCCR1B = 0;
     tcount = 0;
     mult = 0;
     validGPSflag = 1;
   }
-  printFrequency();
-  printGpsDetails();
-  printDateTime();
+  freq_on_lcd();
+  sat_on_lcd();
+  time_on_lcd();
+  date_on_lcd();
 
-  pinMode (ENCODER_CH_A, INPUT_PULLUP);     // enable pull-ups
-  pinMode (ENCODER_CH_B, INPUT_PULLUP); 
-  attachInterrupt (digitalPinToInterrupt (ENCODER_CH_A), rotaryEncoderIsr, FALLING);
+  
+  pinMode (encoderPinA, INPUT_PULLUP);     // enable pull-ups
+  pinMode (encoderPinB, INPUT_PULLUP); 
+  attachInterrupt (digitalPinToInterrupt (encoderPinA), isr, CHANGE);
 }
+//***************************************************************************************
+//                                         LOOP
+//***************************************************************************************
+void loop()
+{
 
-void loop() {
   if (tcount2 != tcount) {
     tcount2 = tcount;
     pps_correct = millis();
   }
   if (tcount < 4 ) {
-    processGps(0);
+    GPSproces(0);
   }
   if (gps.time.isUpdated()) {
     hour = (gps.time.hour() + zone) %24 ; // zmiany czasu
@@ -228,63 +246,70 @@ void loop() {
   }
   
   if (gps.satellites.isUpdated() && menu == 0) {
-    printGpsDetails();
+    sat_on_lcd();
   }
 
-  if (new_freq == FREQ_CORR_UPDATED) {
+  if (new_freq == 1) {
     correct_si5351a();
-    new_freq = FREQ_UPDATE_DONE;
+    new_freq = 0;
     if (abs(stab_float)<1)  {
-      printHighPrecMarker(true);
-      LOCK_ACHEIVED = true;
+      lcd.setCursor(112, 4);
+      lcd.print("@");
+      digitalWrite(LED, HIGH);
+      fixed = true;
     }
     if (abs(stab_float)>1) {
-      printHighPrecMarker(false);
-      LOCK_ACHEIVED = false;
+      lcd.setCursor(112, 4);
+      lcd.print(" ");
+      digitalWrite(LED, LOW);
+      fixed = false;
     }
   }
 
-  if (new_freq == FREQ_MAN_UPDATED) {
+  if (new_freq == 2) {
     update_si5351a();
-    printFrequency();
-    new_freq = FREQ_UPDATE_DONE;
+    freq_on_lcd();
+    new_freq = 0;
   }
 
-  if (digitalRead(encoderButton) == 0) {
-    delay(50);
-    if (digitalRead(encoderButton) == 0) {
+  if (digitalRead(przycisk) == 0) {
+    delay(10);
+    if (digitalRead(przycisk) == 0) {
       menu++;
-      if (menu > MENU_ITEM_ZONE) menu = MENU_ITEM_MAIN;
-      oled.clear();
-      oled.setCursor(0, 2);
+      if (menu > 5) menu = 0;
+      lcd.clear();
+      lcd.setCursor(0, 2);
       switch (menu) {
-        case MENU_ITEM_MAIN:
-          printGpsDetails();
-          printDateTime();
-          printFrequency();
-          if (LOCK_ACHEIVED)  {
-            printHighPrecMarker(true);
+        case 0:
+          sat_on_lcd();
+          date_on_lcd();                              
+          time_on_lcd();
+          freq_on_lcd();
+          if (fixed)  {
+            lcd.setCursor(112, 4);
+            lcd.print("@");
           }
           else {
-            printHighPrecMarker(false);
+            lcd.setCursor(112, 4);
+            lcd.print(" ");
           }
           time_enable = true;
           break;
-        case MENU_ITEM_BAND:
-          printBand();
+        case 1:
+          band_on_lcd();
           break;
-        case MENU_ITEM_STEP:
-          printStep();
+        case 2:
+          step_on_lcd();
           break;
-        case MENU_ITEM_FREQ:
-          printFrequency();
+        case 3:
+          freq2_on_lcd();
           break;
-        case MENU_ITEM_CORR:
+        case 4:
           EEPROM.writeLong(band * 4, Freq);
-          printStabilityInfo();
+          stab_on_lcd();
           break;
-        case MENU_ITEM_ZONE:
-          printTimezone();
+        case 5:
+          timezone_on_lcd();
           break;
       }
       delay(200);
@@ -295,7 +320,7 @@ void loop() {
     pps_valid = 0;
     pps_correct = millis();
     time_enable = false;
-    oled.setCursor (15, 0);
+    lcd.setCursor (15, 0);
   }
 
   ENCread();
@@ -304,62 +329,64 @@ void loop() {
 //**************************************************************************************
 //                       INTERRUPT  ENC
 //**************************************************************************************
-void ENCread() {
+void ENCread()
+{
   if (fired) {
       if (up) {
+
         switch (menu) {
-          case MENU_ITEM_BAND: {
+          case 1: {
               band++;
               if (band > 5) band = 5;
-              printBand();
+              band_on_lcd();
             }
             break;
-          case MENU_ITEM_STEP: {
+          case 2: {
               f_step++;
               if (f_step > 8)f_step = 8;
-              printStep();
+              step_on_lcd();
             }
             break;
-          case MENU_ITEM_FREQ: {
+          case 3: {
               Freq += freq_step;
               if (Freq > 160000000) Freq -= freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              new_freq = 2;
             }
             break;
-          case MENU_ITEM_ZONE: {
+          case 5: {
               zone++;
               if (zone > 6)zone = 5;
               EEPROM.writeInt(80, zone);
-              printTimezone();
+              timezone_on_lcd();
             }
             break;
         }
       }
       else {
         switch (menu) {
-          case MENU_ITEM_BAND: {
+          case 1: {
               band--;
               if (band == 0) band = 1;
-              printBand();
+              band_on_lcd();
             }
             break;
-          case MENU_ITEM_STEP: {
+          case 2: {
               f_step--;
-              if (f_step == 0 ) f_step = 1;
-              printStep();
+              if (f_step == 0 )f_step = 1;
+              step_on_lcd();
             }
             break;
-          case MENU_ITEM_FREQ: {
+          case 3: {
               Freq -= freq_step;
               if (Freq > 160000000 || Freq < 1000) Freq += freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              new_freq = 2;
             }
             break;
-          case MENU_ITEM_ZONE: {
+          case 5: {
               zone--;
               if (zone < -6)zone = -5;
               EEPROM.writeInt(80, zone);
-              printTimezone();
+              timezone_on_lcd();
             }
             break;
         }
@@ -379,14 +406,13 @@ void PPSinterrupt()
     TCCR1B = 7;                                  //Clock on rising edge of pin 5
     // loop();
   }
-  
   if (tcount == 44)                              //The 40 second gate time elapsed - stop counting
   {
     TCCR1B = 0;                                  //Turn off counter
     if (pps_valid == 1) {
       XtalFreq_old = XtalFreq;
       XtalFreq = mult * 0x10000 + TCNT1;           //Calculate correction factor
-      new_freq = FREQ_CORR_UPDATED;
+      new_freq = 1;
     }
     TCNT1 = 0;                                   //Reset count to zero
     mult = 0;
@@ -394,9 +420,8 @@ void PPSinterrupt()
     pps_valid = 1;
     Serial.begin(9600);
     stab_count = 44;
-    printStabilityInfo();
+    stab_on_lcd();
   }
-
   if (validGPSflag == 1)                      //Start the UTC timekeeping process
   {
     second++;
@@ -411,178 +436,255 @@ void PPSinterrupt()
       minute = 0 ;
     }
     if (hour == 24) hour = 0 ;
-    if (time_enable) printDateTime();
+    if (time_enable) time_on_lcd();
   }
-  if (menu == MENU_ITEM_CORR) {
-    oled.setCursor(96, 6);
-    if (stab_count < 10) oled.print(" ");
-    oled.print(stab_count);
+  if (menu == 4) {
+    lcd.setCursor(96, 6);
+    if (stab_count < 10) lcd.print(" ");
+    lcd.print(stab_count);
   }
 }
 //*******************************************************************************
 // Timer 1 overflow intrrupt vector.
 //*******************************************************************************
-ISR(TIMER1_OVF_vect) {
+ISR(TIMER1_OVF_vect)
+{
   mult++;                                          //Increment multiplier
   TIFR1 = (1 << TOV1);                             //Clear overlow flag
 }
 
-void printTimezone() {
-  time_enable = false;
-  oled.setCursor(0, 2);
-  oled.print("time zone ");
-  if (zone > 0) oled.print("+");
-  oled.print(zone);
-  oled.print(" < > ");
-}
 
-void printStabilityInfo() {
-  time_enable = false;
-  stab_float = getFreqCorrection(); 
-  if (menu == MENU_ITEM_CORR) {
-    oled.setCursor(0, 0);
-    oled.print("freq. correction ");
-    oled.setCursor(0, 2);
-    oled.print("   ");
-    oled.print(stab_float);
-    oled.print(" Hz        ");
-  }
-}
-
-float getFreqCorrection() {
-  long pomocna;
-  stab = XtalFreq - 100000000;
-  stab *= 10 ;
-  if (stab > 100 || stab < -100) {
-    correction = correction + stab;
-  } else if (stab > 20 || stab < -20) {
-    correction += stab / 2;
-  } else {
-    correction += stab / 4;
-  }
-  pomocna = 10000 / (Freq / 1000000);
-  stab *= 100;
-  stab /= pomocna;
-  stab_float = float(stab);
-  return stab_float = stab_float / 10;
-}
-
-void printFrequency2() {
-  time_enable = false;
-  oled.setCursor(0, 2);
-  oled.print("freq. bank ");
-  oled.print(band);
-  oled.print(" < > ");
-}
-
-void printStep() {
-  time_enable = false;
-  oled.setCursor(0, 2);
-  oled.print("step ");
-  switch (f_step) {
-    case 1: freq_step = 1, oled.print("   1 Hz");
-      break;
-    case 2: freq_step = 10, oled.print("  10 Hz");
-      break;
-    case 3: freq_step = 100, oled.print(" 100 Hz");
-      break;
-    case 4: freq_step = 1000, oled.print("  1 kHz");
-      break;
-    case 5: freq_step = 10000, oled.print(" 10 kHz");
-      break;
-    case 6: freq_step = 100000, oled.print("100 kHz");
-      break;
-    case 7: freq_step = 1000000 , oled.print("  1 MHz");
-      break;
-    case 8: freq_step = 10000000, oled.print(" 10 MHz");
-      break;
-  }
-}
-
-void printBand() {
-  time_enable = false;
-  oled.setCursor(0, 2);
-  oled.print("bank ");
-  oled.print(band);
-  oled.print("      < > ");
-  Freq = EEPROM.readLong(band * 4);
-  printFrequency();
-  update_si5351a();
-}
-
-void printDateTime() {
-  char sz[32];
-  sprintf(sz, "%02d:%02d:%02d   %02d.%02d.%02d", hour, minute, second, day, month, year);
-  oled.setCursor(0, 0);
-  oled.print(sz);
-}
-
-void printGpsDetails()
+//********************************************************************************
+//                                TIMEZONE on LCD <>
+//********************************************************************************
+void timezone_on_lcd()
 {
   time_enable = false;
-  oled.setCursor(0, 2);
-  oled.print("sat=");
-  oled.print(gps.satellites.value());
-  TinyGPSHDOP hdop = gps.hdop;
-  if (hdop.isValid()) {
-    oled.print(" hdop=");
-    oled.print(hdop.value());
-    oled.print(" age=");
-    oled.print(hdop.age());
-    oled.println("ms      ");
-  } else {
-    oled.println("");
+  lcd.setCursor(0, 2);
+  lcd.print("TIME zone ");
+  if (zone > 0) lcd.print("+");
+  lcd.print(zone);
+  lcd.print(" < > ");
+}
+//********************************************************************************
+//                                STAB on LCD stabilnośc częstotliwości
+//********************************************************************************
+void stab_on_lcd() {
+  long pomocna;
+  time_enable = false;
+  stab = XtalFreq - 100000000;
+  stab = stab * 10 ;
+  if (stab > 100 || stab < -100) {
+    correction = correction + stab;
   }
+  else if (stab > 20 || stab < -20) {
+    correction = correction + stab / 2;
+  }
+  else correction = correction + stab / 4;
+  pomocna = (10000 / (Freq / 1000000));
+  stab = stab * 100;
+  stab = stab / pomocna;
+  stab_float = float(stab);
+  stab_float = stab_float / 10;
+  if (menu == 4) {
+    lcd.setCursor(0, 0);
+    lcd.print("Freq. correction ");
+    lcd.setCursor(0, 2);
+    lcd.print("   ");
+    lcd.print(stab_float);
+    lcd.print(" Hz        ");
+  }
+}
 
-  TinyGPSLocation location = gps.location;
-  if (location.isValid()) {
-    oled.print("lon=");
-    oled.print(location.lng());
-    oled.print(" lat=");
-    oled.println(location.lat());
+//********************************************************************************
+//                                FREQ_2 on LCD <>
+//********************************************************************************
+void freq2_on_lcd()
+{
+  time_enable = false;
+  lcd.setCursor(0, 2);
+  lcd.print("FREQ Bank ");
+  lcd.print(band);
+  lcd.print(" < > ");
+}
+//********************************************************************************
+//                                STEP on LCD
+//********************************************************************************
+void step_on_lcd()
+{
+  time_enable = false;
+  lcd.setCursor(0, 2);
+  lcd.print("STEP ");
+  switch (f_step) {
+    case 1: freq_step = 1, lcd.print("   1 Hz");
+      break;
+    case 2: freq_step = 10, lcd.print("  10 Hz");
+      break;
+    case 3: freq_step = 100, lcd.print(" 100 Hz");
+      break;
+    case 4: freq_step = 1000, lcd.print("  1 kHz");
+      break;
+    case 5: freq_step = 10000, lcd.print(" 10 kHz");
+      break;
+    case 6: freq_step = 100000, lcd.print("100 kHz");
+      break;
+    case 7: freq_step = 1000000 , lcd.print("  1 MHz");
+      break;
+    case 8: freq_step = 10000000, lcd.print(" 10 MHz");
+      break;
   }
-  
-  TinyGPSAltitude altitude = gps.altitude;
-  if (altitude.isValid()) {
-    oled.print("alt=");
-    oled.print(altitude.meters());
-    oled.println("m");
-  }
+}
+//********************************************************************************
+//                                BAND on LCD
+//********************************************************************************
+void band_on_lcd()
+{
+  time_enable = false;
+  lcd.setCursor(0, 2);
+  lcd.print("BANK ");
+  lcd.print(band);
+  lcd.print("      < > ");
+  Freq = EEPROM.readLong(band * 4);
+  freq_on_lcd();
+  update_si5351a();
+}
+//********************************************************************************
+//                                TIME on LCD
+//********************************************************************************
+void time_on_lcd()
+{
+  char sz[32];
+  sprintf(sz, "%02d:%02d:%02d ", hour, minute, second);
+    lcd.setCursor(30, 0);
+  lcd.print(sz);
+}
 
+//********************************************************************************
+//                                DATE on LCD - podmiana F cor
+//********************************************************************************
+
+void date_on_lcd()
+{
+ char da[32];
+  sprintf(da, "%02d/%02d/%02d ", day, month, year);
+  lcd.setCursor(22, 2);
+  lcd.print(da);
+}
+
+//********************************************************************************
+//                                SAT nr. on LCD
+//********************************************************************************
+void sat_on_lcd()
+{
+  time_enable = false;
+  lcd.setCursor(0, 4);
+  lcd.print("SAT: ");
+  lcd.print(gps.satellites.value());
+  lcd.print("   ");
   time_enable = true;
 }
 
-void printFrequency() {
+//*********************************************************************************
+//                             Freq on LCD
+//*********************************************************************************
+void freq_on_lcd() {
+  char buf[10]; /// tutaj zmiana
+
+  // Print frequency to the LCD
+ 
+  ltoa(Freq, buf, 10);
   time_enable = false;
-  oled.setCursor(16, 6);
-  oled.print(Freq);
-  oled.print(" Hz   ");
-}
-
-void printHighPrecMarker(bool enabled) {
-  oled.setCursor(112, 6);
-  if (enabled) {
-    oled.print("@");
-    digitalWrite(A0, HIGH);
-  } else {
-    oled.print(" ");
-    digitalWrite(A0, LOW);
+    //lcd.home();
+  
+    lcd.setCursor(1,6);
+ // lcd.print(Freq);
+    
+ if (Freq < 1000000)
+  {
+    lcd.print(" ");
+    lcd.print(" ");
+    lcd.print(" ");
+    lcd.print(" ");
+    lcd.print(buf[0]);
+    lcd.print(buf[1]);
+    lcd.print(buf[2]);
+    lcd.print('.');
+    lcd.print(buf[3]);
+    lcd.print(buf[4]);
+    lcd.print(buf[5]);
   }
+
+  if (Freq >= 1000000 && Freq < 10000000)
+  {
+    lcd.print(" ");
+    lcd.print(" ");
+    lcd.print(buf[0]);
+    lcd.print('.');
+    lcd.print(buf[1]);
+    lcd.print(buf[2]);
+    lcd.print(buf[3]);
+    lcd.print('.');
+    lcd.print(buf[4]);
+    lcd.print(buf[5]);
+    lcd.print(buf[6]);
+  }
+
+  if (Freq >= 10000000 && Freq < 100000000)
+  {
+    lcd.print(" ");
+    lcd.print(buf[0]);
+    lcd.print(buf[1]);
+    lcd.print('.');
+    lcd.print(buf[2]);
+    lcd.print(buf[3]);
+    lcd.print(buf[4]);
+    lcd.print('.');
+    lcd.print(buf[5]);
+    lcd.print(buf[6]);
+    lcd.print(buf[7]);
+  }
+
+  if (Freq >= 100000000)
+  {
+    lcd.print(buf[0]);
+    lcd.print(buf[1]);
+    lcd.print(buf[2]);
+    lcd.print('.');
+    lcd.print(buf[3]);
+    lcd.print(buf[4]);
+    lcd.print(buf[5]);
+    lcd.print('.');
+    lcd.print(buf[6]);
+    lcd.print(buf[7]);
+    lcd.print(buf[8]);
+  }
+  lcd.print(" Hz ");
 }
 
-void update_si5351a() {
+//********************************************************************
+//             NEW frequency
+//********************************************************************
+void update_si5351a()
+{
   si5351.set_freq(Freq * SI5351_FREQ_MULT, SI5351_CLK1);
 }
-
-void correct_si5351a() {
+//********************************************************************
+//             NEW frequency correction
+//********************************************************************
+void correct_si5351a()
+{
   si5351.set_correction(correction, SI5351_PLL_INPUT_XO);
 }
-
-void processGps(unsigned long ms) {
+//*********************************************************************
+//                    Odczyt danych z GPS
+//**********************************************************************
+static void GPSproces(unsigned long ms)
+{
   unsigned long start = millis();
-  do {
-    while (Serial.available()) {
+  do
+  {
+    while (Serial.available())
       gps.encode(Serial.read());
-    }
   } while (millis() - start < ms);
 }
+//*********************************************************************
