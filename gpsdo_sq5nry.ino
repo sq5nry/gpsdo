@@ -426,7 +426,7 @@ void PPSinterrupt() {
   }
   if (menu == MENU_ITEM_CORR) {
     oled.setCursor(96, 6);
-    if (stab_count < 10) oled.print(" ");
+    if (stab_count < 10) oled.print("?");
     oled.print(stab_count);
   }
 }
@@ -457,10 +457,11 @@ void printStabilityInfo() {
     oled.print("   ");
     if (firstCorrectionLoopDone) {
       oled.print(stab_float);
-      oled.print(" Hz        ");
+      oled.print(" Hz");
     } else {
-      oled.print("N/A        ");
+      oled.print("N/A");
     }
+    oled.clearToEOL();
   }
 }
 
@@ -543,13 +544,15 @@ void printDateTime() {
 void printGpsDetails() {
   time_enable = false;
   oled.setCursor(0, 2);
+  oled.setInvertMode(true);
   oled.print("sat=");
   oled.print(gps.satellites.value());
+  oled.setInvertMode(false);
   TinyGPSHDOP hdop = gps.hdop;
   if (hdop.isValid()) {
     oled.print(" hdop=");
     oled.print(hdop.value());
-    oled.print(" age=");
+    oled.print(" @");
     oled.print(hdop.age());
     oled.println("ms      ");
   } else {
@@ -578,18 +581,22 @@ void printFrequency() {
   time_enable = false;
   oled.setCursor(0, 6);
   oled.print(Freq);
-  oled.print("Hz ");
+  oled.print("Hz");
+  oled.clearToEOL();
 }
 
 void printFrequencyWithCorrection() {
   oled.setCursor(0, 6);
+  oled.clearToEOL();
+  oled.setCursor(0, 6);
   oled.print(Freq);
   oled.print("Hz ");
   if (firstCorrectionLoopDone) {
-    oled.print(stab_float >= 0.0f ? '-' : '+');
+    //oled.print(stab_float >= 0.0f ? '-' : '+');
     oled.print(stab_float);
-    oled.print("Hz           ");
+    //oled.print("Hz");
   }
+  oled.clearToEOL();
 }
 
 void printHighPrecMarker(bool enabled) {
