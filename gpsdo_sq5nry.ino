@@ -27,7 +27,7 @@ TinyGPSPlus gps;
 
 // Si5351 PLL synthesiser
 Si5351 si5351;
-#define MIN_FREQ 8000
+#define MIN_FREQ 1000
 #define MAX_FREQ 160000000
 
 // OLED Pins
@@ -76,7 +76,8 @@ unsigned long XtalFreq = 100000000;
 unsigned long XtalFreq_old = 100000000;
 long stab;
 long correction = 0;
-byte stab_count = 44;
+#define MAX_COUNT 44
+byte stab_count = MAX_COUNT;
 unsigned long mult = 0, Freq = 10000000;
 int second = 0, minute = 0, hour = 0;
 int day = 0, month = 0, year = 0;
@@ -88,13 +89,14 @@ char c;
 boolean newdata = false;
 boolean GPSstatus = true;
 boolean LOCK_ACHEIVED = false;
-byte new_freq = FREQ_CORR_UPDATED;
 unsigned long freq_step = 1000;
 byte encoderOLD, menu = 0, bank = 1, f_step = 1;
 boolean time_enable = true;
 unsigned long pps_correct;
 byte pps_valid = 1;
 float stab_float = 1000;
+byte freqState = FREQ_CORR_UPDATED;
+boolean firstCorrectionLoopDone = false;
 
 void rotaryEncoderIsr() {
   cli();
@@ -236,23 +238,22 @@ void loop() {
     printGpsDetails();
   }
 
-  if (new_freq == FREQ_CORR_UPDATED) {
+  if (freqState == FREQ_CORR_UPDATED) {
     correct_si5351a();
-    new_freq = FREQ_UPDATE_DONE;
+    freqState = FREQ_UPDATE_DONE;
     if (abs(stab_float)<1)  {
       printHighPrecMarker(true);
       LOCK_ACHEIVED = true;
-    }
-    if (abs(stab_float)>1) {
+    } else {
       printHighPrecMarker(false);
       LOCK_ACHEIVED = false;
     }
   }
 
-  if (new_freq == FREQ_MAN_UPDATED) {
+  if (freqState == FREQ_MAN_UPDATED) {
     update_si5351a();
     printFrequency();
-    new_freq = FREQ_UPDATE_DONE;
+    freqState = FREQ_UPDATE_DONE;
   }
 
   if (digitalRead(encoderButton) == 0) {
@@ -267,7 +268,12 @@ void loop() {
           printGpsDetails();
           printDateTime();
           printFrequency();
-          printHighPrecMarker(LOCK_ACHEIVED);
+          if (LOCK_ACHEIVED)  {
+            printHighPrecMarker(true);
+          }
+          else {
+            printHighPrecMarker(false);
+          }
           time_enable = true;
           break;
         case MENU_ITEM_BANK:
@@ -323,7 +329,7 @@ void ENCread() {
           case MENU_ITEM_FREQ: {
               Freq += freq_step;
               if (Freq > MAX_FREQ) Freq -= freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              freqState = FREQ_MAN_UPDATED;
             }
             break;
           case MENU_ITEM_ZONE: {
@@ -338,8 +344,7 @@ void ENCread() {
       else {
         switch (menu) {
           case MENU_ITEM_BANK: {
-              bank--;
-              if (bank == 0) bank = 1;
+              if (--bank == 0) bank = 1;
               printBank();
             }
             break;
@@ -352,12 +357,11 @@ void ENCread() {
           case MENU_ITEM_FREQ: {
               Freq -= freq_step;
               if (Freq > MAX_FREQ || Freq < MIN_FREQ) Freq += freq_step;
-              new_freq = FREQ_MAN_UPDATED;
+              freqState = FREQ_MAN_UPDATED;
             }
             break;
           case MENU_ITEM_ZONE: {
-              zone--;
-              if (zone < -6) zone = -5;
+              if (--zone < -6) zone = -5;
               EEPROM.writeInt(80, zone);
               printTimezone();
             }
@@ -372,6 +376,7 @@ void ENCread() {
 //**************************************************************************************
 void PPSinterrupt()
 {
+  printCountProgress((tcount * 100)/MAX_COUNT);
   tcount++;
   stab_count--;
   if (tcount == 4)                               // Start counting the 2.5 MHz signal from Si5351A CLK0
@@ -380,20 +385,22 @@ void PPSinterrupt()
     // loop();
   }
   
-  if (tcount == 44)                              //The 40 second gate time elapsed - stop counting
+  if (tcount == MAX_COUNT)                              //The 40 second gate time elapsed - stop counting
   {
+    firstCorrectionLoopDone = true;
+    printFrequencyWithCorrection();
     TCCR1B = 0;                                  //Turn off counter
     if (pps_valid == 1) {
       XtalFreq_old = XtalFreq;
       XtalFreq = mult * 0x10000 + TCNT1;           //Calculate correction factor
-      new_freq = FREQ_CORR_UPDATED;
+      freqState = FREQ_CORR_UPDATED;
     }
     TCNT1 = 0;                                   //Reset count to zero
     mult = 0;
     tcount = 0;                                  //Reset the seconds counter
     pps_valid = 1;
     Serial.begin(9600);
-    stab_count = 44;
+    stab_count = MAX_COUNT;
     printStabilityInfo();
   }
 
@@ -444,8 +451,12 @@ void printStabilityInfo() {
     oled.print("freq. correction ");
     oled.setCursor(0, 2);
     oled.print("   ");
-    oled.print(stab_float);
-    oled.print(" Hz        ");
+    if (firstCorrectionLoopDone) {
+      oled.print(stab_float);
+      oled.print(" Hz        ");
+    } else {
+      oled.print("N/A        ");
+    }
   }
 }
 
@@ -517,8 +528,7 @@ void printDateTime() {
   oled.print(sz);
 }
 
-void printGpsDetails()
-{
+void printGpsDetails() {
   time_enable = false;
   oled.setCursor(0, 2);
   oled.print("sat=");
@@ -554,9 +564,20 @@ void printGpsDetails()
 
 void printFrequency() {
   time_enable = false;
-  oled.setCursor(16, 6);
+  oled.setCursor(0, 6);
   oled.print(Freq);
-  oled.print(" Hz   ");
+  oled.print("Hz ");
+}
+
+void printFrequencyWithCorrection() {
+  oled.setCursor(0, 6);
+  oled.print(Freq);
+  oled.print("Hz ");
+  if (firstCorrectionLoopDone) {
+    oled.print(stab_float >= 0.0f ? '-' : '+');
+    oled.print(stab_float);
+    oled.print("Hz           ");
+  }
 }
 
 void printHighPrecMarker(bool enabled) {
@@ -568,6 +589,19 @@ void printHighPrecMarker(bool enabled) {
     oled.print(" ");
     digitalWrite(A0, LOW);
   }
+}
+
+#define MAX_PROGRESS_CHARS 21
+#define BLANK_PROGRESS_LINE "                        \0"
+void printCountProgress(int progress) {
+  oled.setCursor(0, 7);
+  char line[MAX_PROGRESS_CHARS + 4] = BLANK_PROGRESS_LINE;
+  for(int x=0; x<progress/(100 / MAX_PROGRESS_CHARS); x++) {
+    line[x] = '-';
+  }
+  oled.setLetterSpacing(0);
+  oled.print(line);
+  oled.setLetterSpacing(1);
 }
 
 void update_si5351a() {
