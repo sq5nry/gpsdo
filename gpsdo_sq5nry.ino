@@ -23,12 +23,14 @@ TinyGPSPlus gps;
 // The Si5351 object
 Si5351 si5351;
 
-#define LED 13
+//#define LED 13
+#define LED_PPS 12
+#define LED_ACC 11
 #define ppsPin 2
 
 unsigned long XtalFreq = 100000000;
 long correction = 124000;
-unsigned long mult = 0, Freq = 41000000;
+unsigned long mult = 0, Freq = 40000000;
 unsigned int tcount = 0;
 unsigned int tcount2 = 0;
 int validGPSflag = false;
@@ -39,8 +41,14 @@ byte pps_valid = 1;
 float stab_float = 1000;
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(LED, OUTPUT);
+
+  pinMode(LED_PPS, OUTPUT);
+  pinMode(LED_ACC, OUTPUT);
+digitalWrite(LED_ACC, HIGH);
+digitalWrite(LED_PPS, HIGH);
+delay(500);
+digitalWrite(LED_ACC, LOW);
+digitalWrite(LED_PPS, LOW);
 
   TCCR1B = 0;              //Disable Timer5 during setup
   TCCR1A = 0;              //Reset
@@ -51,7 +59,7 @@ void setup() {
   digitalWrite(ppsPin, HIGH);
 
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, correction);
-  si5351.drive_strength(SI5351_CLK1, SI5351_DRIVE_2MA);
+  si5351.drive_strength(SI5351_CLK1, SI5351_DRIVE_8MA);
 
   Serial.begin(9600);
 
@@ -96,10 +104,10 @@ void loop() {
     correct_si5351a();
     new_freq = 0;
     if (abs(stab_float) < 1) {
-      digitalWrite(LED, HIGH);
+      digitalWrite(LED_ACC, HIGH);
     }
     if (abs(stab_float) > 1) {
-      digitalWrite(LED, LOW);
+      digitalWrite(LED_ACC, LOW);
     }
   }
 
@@ -116,6 +124,7 @@ void loop() {
 
 byte stab_count = 44;
 void PPSinterrupt() {
+  togglePpsLed();
   tcount++;
   stab_count--;
 
@@ -140,6 +149,17 @@ void PPSinterrupt() {
     calculateCorrection();
   }
 }
+
+bool ppsLed = true;
+void togglePpsLed() {
+  if (ppsLed) {
+    digitalWrite(LED_PPS, HIGH);
+  } else {
+    digitalWrite(LED_PPS, LOW);
+  }
+  ppsLed = !ppsLed;
+}
+
 
 //*******************************************************************************
 // Timer 1 overflow intrrupt vector.
